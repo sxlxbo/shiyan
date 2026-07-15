@@ -53,6 +53,18 @@ def init_camera():
 def configure_external_trigger(device):
     trigger_in = device.get_i_trigger_in()
     if not trigger_in:
+        hw_identification = device.get_i_hw_identification()
+        integrator = (
+            hw_identification.get_integrator()
+            if hw_identification is not None
+            else ""
+        )
+        if integrator == "rp1-cfe":
+            print(
+                "检测到 rp1-cfe：插件未提供 I_TriggerIn，"
+                "使用平台默认 EXTTRIG 数据流。"
+            )
+            return None
         raise RuntimeError("设备不提供 Trigger In，停止录制")
     enabled = trigger_in.enable(CHANNEL_ID)
     if enabled is False:
