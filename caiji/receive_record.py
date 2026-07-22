@@ -10,18 +10,17 @@ from bisect import bisect_right
 from datetime import datetime
 from pathlib import Path
 
-from metavision_core.event_io import EventsIterator
-from metavision_core.event_io.raw_reader import RawReader, initiate_device
-
 from sync_protocol import (
     CHANNEL_ID,
-    EXPECTED_RGB_PULSES,
+    EXPECTED_STATE_PULSES,
     MARKER_INTERVAL_US,
     PREAMBLE_PULSES,
-    RGB_INTERVAL_US,
+    PROTOCOL_VERSION,
     START_PULSES,
+    STATE_INTERVAL_US,
     STOP_PULSES,
     TOTAL_DURATION,
+    state_metadata,
 )
 
 
@@ -31,13 +30,15 @@ HARD_RECORD_TIMEOUT = TOTAL_DURATION + 7.0
 MARKER_TOLERANCE_US = 8_000
 START_TO_DATA_MIN_US = 180_000
 STOP_GAP_MIN_US = 180_000
-RGB_TOLERANCE_US = 20_000
+STATE_TOLERANCE_US = 20_000
 POST_STOP_DRAIN = 0.08
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "trigger_records"
 
 
 def init_camera():
+    from metavision_core.event_io.raw_reader import initiate_device
+
     try:
         device = initiate_device("")
         if not device:
@@ -107,6 +108,8 @@ def stop_raw_log(events_stream, recording):
 
 
 def collect_protocol(device):
+    from metavision_core.event_io import EventsIterator
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     final_path = OUTPUT_DIR / f"genx320_led_sync_{stamp}.raw"
@@ -121,7 +124,7 @@ def collect_protocol(device):
     preamble_rises = []
     recorded_events = []
     start_rises = []
-    data_rises = []
+    state_rises = []
     stop_rises = []
     record_started_at = None
     stop_detected_at = None
@@ -172,22 +175,22 @@ def collect_protocol(device):
                         start_rises = [timestamp]
                     if len(start_rises) == START_PULSES:
                         state = "WAIT_DATA"
-                        print("START 标记确认，等待首个正式 R 脉冲。")
+                        print("START 标记确认，等待首个正式 BLACK 脉冲。")
 
                 elif state == "WAIT_DATA":
                     if timestamp - start_rises[-1] >= START_TO_DATA_MIN_US:
-                        data_rises.append(timestamp)
+                        state_rises.append(timestamp)
                         state = "DATA"
-                        print("正式 RGB 段开始。")
+                        print("正式 BLACK/R/G/B 状态段开始。")
 
                 elif state == "DATA":
-                    if delta is not None and abs(delta - RGB_INTERVAL_US) <= RGB_TOLERANCE_US:
-                        data_rises.append(timestamp)
+                    if delta is not None and abs(delta - STATE_INTERVAL_US) <= STATE_TOLERANCE_US:
+                        state_rises.append(timestamp)
                     elif delta is not None and delta >= STOP_GAP_MIN_US:
                         stop_rises = [timestamp]
                         state = "WAIT_STOP"
                     else:
-                        raise RuntimeError(f"RGB 周期异常：相邻上升沿 {delta} us")
+                        raise RuntimeError(f"状态周期异常：相邻上升沿 {delta} us")
 
                 elif state == "WAIT_STOP":
                     if delta is not None and in_marker_range(delta):
@@ -211,9 +214,9 @@ def collect_protocol(device):
         raise RuntimeError("SDK 未生成有效的 RAW 文件")
 
     verification = verify_raw(partial_path)
-    if verification["data_count"] != EXPECTED_RGB_PULSES:
+    if verification["data_count"] != EXPECTED_STATE_PULSES:
         raise RuntimeError(
-            f"正式脉冲数 {verification['data_count']}，预期 {EXPECTED_RGB_PULSES}；"
+            f"正式状态脉冲数 {verification['data_count']}，预期 {EXPECTED_STATE_PULSES}；"
             f"保留 partial 文件供诊断"
         )
 
@@ -225,6 +228,8 @@ def collect_protocol(device):
 
 
 def read_all_triggers(raw_file):
+    from metavision_core.event_io.raw_reader import RawReader
+
     reader = RawReader(str(raw_file))
     events = []
     while not reader.is_done():
@@ -258,19 +263,19 @@ def verify_raw(raw_file):
     while data_start < len(rises) and rises[data_start] - rises[start_index + 1] < START_TO_DATA_MIN_US:
         data_start += 1
     if data_start >= len(rises):
-        raise RuntimeError("RAW 中没有正式 RGB 脉冲")
+        raise RuntimeError("RAW 中没有正式状态脉冲")
 
     data_rises = [rises[data_start]]
     cursor = data_start + 1
     while cursor < len(rises):
         delta = rises[cursor] - data_rises[-1]
-        if abs(delta - RGB_INTERVAL_US) <= RGB_TOLERANCE_US:
+        if abs(delta - STATE_INTERVAL_US) <= STATE_TOLERANCE_US:
             data_rises.append(rises[cursor])
             cursor += 1
         elif delta >= STOP_GAP_MIN_US:
             break
         else:
-            raise RuntimeError(f"RAW 正式段周期异常：{delta} us")
+            raise RuntimeError(f"RAW 正式状态段周期异常：{delta} us")
 
     stop = rises[cursor:cursor + STOP_PULSES]
     if len(stop) != STOP_PULSES or not all(
@@ -280,20 +285,32 @@ def verify_raw(raw_file):
 
     print(
         f"RAW 校验：上升沿 {len(rises)}，下降沿 "
-        f"{sum(event['polarity'] == 0 for event in events)}，正式 RGB {len(data_rises)}。"
+        f"{sum(event['polarity'] == 0 for event in events)}，"
+        f"正式状态 {len(data_rises)}。"
     )
     return {"events": events, "data_rises": data_rises, "data_count": len(data_rises)}
 
 
 def write_sidecar(path, events, data_rises):
     data_index = {timestamp: index for index, timestamp in enumerate(data_rises)}
-    fieldnames = ["timestamp_us", "id", "polarity", "role", "cycle_index", "color"]
+    fieldnames = [
+        "protocol_version",
+        "timestamp_us",
+        "id",
+        "polarity",
+        "role",
+        "state_index",
+        "cycle_index",
+        "phase_index",
+        "state",
+    ]
     with path.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         for event in events:
             index = data_index.get(event["timestamp_us"])
-            role = "RGB_RISE" if index is not None else "MARKER"
+            metadata = state_metadata(index) if index is not None else None
+            role = metadata["role"] if metadata is not None else "MARKER"
             if index is None and event["polarity"] == 0 and data_rises:
                 candidate = bisect_right(data_rises, event["timestamp_us"]) - 1
                 if (
@@ -301,13 +318,17 @@ def write_sidecar(path, events, data_rises):
                     and 0 <= event["timestamp_us"] - data_rises[candidate] <= 10_000
                 ):
                     index = candidate
-                    role = "RGB_FALL"
+                    metadata = state_metadata(index)
+                    role = metadata["role"].replace("_RISE", "_FALL")
             writer.writerow(
                 {
+                    "protocol_version": PROTOCOL_VERSION,
                     **event,
                     "role": role,
-                    "cycle_index": "" if index is None else index,
-                    "color": "" if index is None else ("R", "G", "B")[index % 3],
+                    "state_index": "" if metadata is None else metadata["state_index"],
+                    "cycle_index": "" if metadata is None else metadata["cycle_index"],
+                    "phase_index": "" if metadata is None else metadata["phase_index"],
+                    "state": "" if metadata is None else metadata["state"],
                 }
             )
 

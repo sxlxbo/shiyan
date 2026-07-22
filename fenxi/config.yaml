@@ -1,0 +1,37 @@
+protocol:
+  version: rgb-black-sync-v2
+  channel_id: 0
+  state_interval_us: 100000
+  state_tolerance_us: 20000
+  expected_state_pulses: 150
+  expected_complete_cycles: 25
+  expected_color_samples: 25
+  minimum_complete_cycles: 3
+  csv_match_tolerance_us: 50
+
+timing:
+  search_pre_us: 5000
+  search_post_us: 50000
+  bin_us: 1000
+  energy_fraction: 0.90
+  window_min_us: -5000
+  window_max_us: 40000
+  background_start_us: -50000
+  background_end_us: -10000
+  color_peak_warning_us: 5000
+
+filter:
+  hot_pixel_mad: 8.0
+  hot_pixel_min_events: 5
+  cycle_outlier_mad: 5.0
+  spatial_filter: median3
+
+reconstruction:
+  epsilon: 1.0e-6
+
+render:
+  low_percentile: 1.0
+  high_percentile: 99.0
+  tone_map: asinh
+  gamma: 2.2
+  titles: true

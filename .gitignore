@@ -18,6 +18,10 @@ env/
 caiji/trigger_records/
 *.raw
 *.partial.raw
+fenxi/input/*
+!fenxi/input/.gitkeep
+fenxi/output/*
+!fenxi/output/.gitkeep
 
 # Local daily reports
 z日报/

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""树莓派 5：驱动 WS2812B，并向 GenX320 发送可识别的同步协议。"""
+"""树莓派 5：驱动 WS2812B，并发送黑场基准 RGB 同步协议。"""
 
 import csv
 import time
@@ -12,18 +12,21 @@ import neopixel_spi as neopixel
 from gpiozero import DigitalOutputDevice
 
 from sync_protocol import (
+    COLOR_CYCLE_COUNT,
     DATA_TO_STOP_GUARD_S,
-    EXPECTED_RGB_PULSES,
+    EXPECTED_STATE_PULSES,
+    FORMAL_STATE_SEQUENCE,
     MARKER_INTERVAL_S,
     PREAMBLE_GUARD_S,
     PREAMBLE_PULSES,
     PROTOCOL_VERSION,
-    RGB_INTERVAL_S,
     START_PULSES,
     START_TO_DATA_GUARD_S,
+    STATE_HOLD_S,
     STOP_PULSES,
     TOTAL_DURATION,
     TRIGGER_PULSE_WIDTH_S,
+    state_metadata,
 )
 
 
@@ -31,11 +34,12 @@ TRIGGER_OUT_PIN = 17
 LED_COUNT = 256
 SAFE_BRIGHTNESS = 0.2
 
-COLOR_SEQUENCE = [
-    ("R", (255, 0, 0)),
-    ("G", (0, 255, 0)),
-    ("B", (0, 0, 255)),
-]
+STATE_RGB = {
+    "BLACK": (0, 0, 0),
+    "R": (255, 0, 0),
+    "G": (0, 255, 0),
+    "B": (0, 0, 255),
+}
 
 
 def get_center_block_indices():
@@ -84,41 +88,44 @@ def sync_led_and_trigger():
     )
     pixels.brightness = SAFE_BRIGHTNESS
     target_pixels = get_center_block_indices()
-    cycle_count = EXPECTED_RGB_PULSES
     rows = []
 
-    print("=" * 58)
+    print("=" * 64)
     print(f"GenX320 RGB 同步协议 {PROTOCOL_VERSION}")
     print(
-        f"正式段: {cycle_count} 次切换 / {TOTAL_DURATION:.1f} s, "
-        f"{RGB_INTERVAL_S * 1000:.0f} ms 周期, "
+        f"正式段: {COLOR_CYCLE_COUNT} 个完整 RGB 周期 / "
+        f"{EXPECTED_STATE_PULSES} 次状态切换 / {TOTAL_DURATION:.1f} s"
+    )
+    print(
+        f"序列: {' -> '.join(FORMAL_STATE_SEQUENCE)}，"
+        f"每状态 {STATE_HOLD_S * 1000:.0f} ms，"
         f"Trigger {TRIGGER_PULSE_WIDTH_S * 1000:.1f} ms"
     )
-    print("Trigger 在 pixels.show() 返回后发出；首个正式颜色固定为 R。")
-    print("=" * 58)
+    print("Trigger 在 pixels.show() 返回后发出；BLACK 与颜色切换都会触发。")
+    print("=" * 64)
 
     try:
-        set_pixels(pixels, target_pixels, (0, 0, 0))
+        set_pixels(pixels, target_pixels, STATE_RGB["BLACK"])
         send_marker(trigger_pin, PREAMBLE_PULSES, "PREAMBLE")
         time.sleep(PREAMBLE_GUARD_S)
         send_marker(trigger_pin, START_PULSES, "START")
         time.sleep(START_TO_DATA_GUARD_S)
 
         first_deadline = time.monotonic()
-        for cycle_index in range(cycle_count):
-            planned = first_deadline + cycle_index * RGB_INTERVAL_S
+        for state_index in range(EXPECTED_STATE_PULSES):
+            planned = first_deadline + state_index * STATE_HOLD_S
             sleep_until(planned)
             actual_before_show = time.monotonic()
-            color, rgb = COLOR_SEQUENCE[cycle_index % len(COLOR_SEQUENCE)]
-            set_pixels(pixels, target_pixels, rgb)
+            metadata = state_metadata(state_index)
+            set_pixels(pixels, target_pixels, STATE_RGB[metadata["state"]])
             shown_at = time.monotonic()
             send_pulse(trigger_pin)
             triggered_at = time.monotonic()
             overrun_ms = max(0.0, actual_before_show - planned) * 1000
             rows.append(
                 {
-                    "cycle_index": cycle_index,
-                    "color": color,
+                    "protocol_version": PROTOCOL_VERSION,
+                    **metadata,
                     "planned_monotonic_s": f"{planned:.9f}",
                     "shown_monotonic_s": f"{shown_at:.9f}",
                     "trigger_finished_monotonic_s": f"{triggered_at:.9f}",
@@ -126,21 +133,22 @@ def sync_led_and_trigger():
                 }
             )
             print(
-                f"  RGB: {cycle_index + 1:>3}/{cycle_count} | {color} | "
-                f"超期 {overrun_ms:.2f} ms",
+                f"  STATE: {state_index + 1:>3}/{EXPECTED_STATE_PULSES} | "
+                f"cycle {metadata['cycle_index'] + 1:>2}/{COLOR_CYCLE_COUNT} | "
+                f"{metadata['state']:<5} | 超期 {overrun_ms:.2f} ms",
                 end="\r",
             )
 
         print()
         time.sleep(DATA_TO_STOP_GUARD_S)
         send_marker(trigger_pin, STOP_PULSES, "STOP")
-        print(f"完成：{cycle_count} 次 RGB 切换。")
+        print(f"完成：{COLOR_CYCLE_COUNT} 个黑场基准 RGB 周期。")
     except KeyboardInterrupt:
         print("\n用户中断；不会发送伪造的 STOP 标记。")
     finally:
         trigger_pin.off()
         trigger_pin.close()
-        pixels.fill((0, 0, 0))
+        pixels.fill(STATE_RGB["BLACK"])
         pixels.show()
         if rows:
             with schedule_path.open("w", newline="", encoding="utf-8-sig") as stream:
