@@ -23,8 +23,10 @@ fenxi/input/*
 fenxi/output/*
 !fenxi/output/.gitkeep
 
-# Local daily reports
-z日报/
+# Local working notes — never commit (simulated data, daily reports, plans)
+日报/
+模拟/
+计划/
 
 # OS metadata
 .DS_Store
